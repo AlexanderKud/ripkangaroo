@@ -6,7 +6,7 @@ hope you guys will hit something supwe soon !!
 
 #  USAGE:
 
-[ usage: kangrip.py [-h] -f FILE [-R] [-S] [-k KANGAROOS] [-s START] [-e END] [-o OUTPUT] [-r]
+[usage: kangrip.py [-h] -f FILE [-R] [-S] [-k KANGAROOS] [-s START] [-e END] [-o OUTPUT] [-r]
 
 Kangaroo algorithm with RIPEMD-160 hash matching.
 
