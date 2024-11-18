@@ -5,7 +5,7 @@ have a great days !!
 hope you guys will hit something supwe soon !!
 
 #  USAGE:
-[
+
 usage: kangrip.py [-h] -f FILE [-R] [-S] [-k KANGAROOS] [-s START] [-e END] [-o OUTPUT] [-r]
 
 Kangaroo algorithm with RIPEMD-160 hash matching.
@@ -23,7 +23,7 @@ options:
   -o OUTPUT, --output OUTPUT
                         Output file to store found private keys
   -r, --reverse         Enable reverse scan direction
-]
+
 
 > the COMMAND I'm using is for puzz 66.
 >
@@ -35,14 +35,21 @@ options:
 1. Its error less and the main thing we are suffering from that it goes for decimal units instead of hexadecimmal shit....
 
 2. speed is super slow but in theoryy of computing logicss......
+   
    > if you use -k 1 the speed will be same as - k2,3,4,5.... (whatever)
+   > 
    > also according to the theory :
+   > 
    > if -k 100 is used = 7000 then the kang speed will be about 100kangs x speed of one kang = 7000 kngs
+   > 
    > HURRAYYY!!!!!
+   > 
    > but its not compatible upto 2 gb of data file...........
+   > 
    > speed will simultaneously decrease after every kang end the range
+   > 
 
-3. multiple kangaroos for RIPMD160 is slowing it i need you guys to make it even more correct.....
+4. multiple kangaroos for RIPMD160 is slowing it i need you guys to make it even more correct.....
 
 # kangrip.py ?? 
 
