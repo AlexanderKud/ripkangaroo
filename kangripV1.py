@@ -1,133 +1,112 @@
-import os
-import time
-import hashlib
-from ecdsa import SECP256k1, SigningKey
-from multiprocessing import Process, Value, Lock, Event, cpu_count
+import concurrent.futures
 import argparse
+import time
+import os
+import signal
+import sys
+from Crypto.Hash import RIPEMD160, SHA256
+from coincurve import PrivateKey
+import numpy as np
+import secrets
+import random
 
-SECP256K1_ORDER = int("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364140", 16)
+# Constants for secp256k1 curve
+CURVE_ORDER = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
 
-def load_targets(file_path):
-    """Load target RIPEMD-160 hashes from a file."""
-    try:
-        with open(file_path, 'r') as f:
-            return set(line.strip() for line in f if line.strip())
-    except FileNotFoundError:
-        print(f"Error: The file '{file_path}' was not found.")
-        exit(1)
+# Signal handler for graceful shutdown
+def signal_handler(sig, frame):
+    print("\nProcess interrupted by user. Exiting...")
+    sys.exit(0)
 
-def save_match(private_key, hash_value):
-    """Save matched private key and hash to a file."""
-    with open("found.txt", "a") as f:
-        f.write(f"Private Key: {private_key.hex()}\nRIPEMD-160 Hash: {hash_value}\n\n")
+# Registering signal to handle keyboard interrupts
+signal.signal(signal.SIGINT, signal_handler)
 
-def generate_jump_table(size=100):
-    """Generate jump table for the kangaroo algorithm with random steps."""
-    return [os.urandom(32) for _ in range(size)]
+# RIPEMD-160 hashing function using PyCryptodome
+def ripemd160(data):
+    h = RIPEMD160.new()
+    h.update(data)
+    return h.digest()
 
-def private_key_to_ripemd160(private_key):
-    """Convert a private key to its RIPEMD-160 hash (both compressed and uncompressed)."""
-    signing_key = SigningKey.from_string(private_key, curve=SECP256k1)
-    public_key = signing_key.verifying_key.to_string()
+# Function to generate secure random numbers within a specific range
+def generate_random_in_range(start, end):
+    range_size = end - start
+    return start + secrets.randbelow(range_size)
 
-    # Compress the public key based on y-coordinate parity
-    compressed_key = b'\x02' + public_key[:32] if public_key[32] % 2 == 0 else b'\x03' + public_key[:32]
-    uncompressed_key = b'\x04' + public_key
+# Kangaroo worker function for parallel processing
+def kangaroo_worker(start_range, end_range, target_ripemd_list):
+    found_keys = []
+    for _ in range(10000):  # Adjust iterations for batch processing if needed
+        candidate = generate_random_in_range(start_range, end_range)
+        
+        if candidate >= CURVE_ORDER:
+            continue
 
-    ripemd160_compressed = hashlib.new('ripemd160', hashlib.sha256(compressed_key).digest()).digest()
-    ripemd160_uncompressed = hashlib.new('ripemd160', hashlib.sha256(uncompressed_key).digest()).digest()
+        try:
+            # Generate private key
+            priv_key = PrivateKey(candidate.to_bytes(32, 'big'))
+            # Derive the public key in compressed format
+            pub_key = priv_key.public_key.format(compressed=True)
 
-    return ripemd160_compressed.hex(), ripemd160_uncompressed.hex()
+            # Generate RIPEMD-160 hash of the public key
+            sha256_hash = SHA256.new(pub_key).digest()
+            ripemd_hash = ripemd160(sha256_hash)
 
-def kangaroo_jump(private_key, jump_table, index):
-    """Perform a kangaroo jump based on the jump table at a given index."""
-    step = int.from_bytes(jump_table[index % len(jump_table)], 'big')
-    new_key = (int.from_bytes(private_key, 'big') + step) % SECP256K1_ORDER
-    return new_key.to_bytes(32, 'big')
+            # Check if hash is in target list
+            if ripemd_hash in target_ripemd_list:
+                found_keys.append((priv_key.to_hex(), ripemd_hash.hex()))
+        except Exception as e:
+            print(f"Error with key {hex(candidate)}: {e}")
+    return found_keys
 
-def scan_worker(start_key, end_key, targets, jump_table, stop_event, generated_count, lock):
-    """Worker function to generate and check private keys using kangaroo jumps within a specified range."""
-    current_key = start_key
-    jump_index = 0
-
-    while int.from_bytes(current_key, 'big') < int.from_bytes(end_key, 'big') and not stop_event.is_set():
-        compressed, uncompressed = private_key_to_ripemd160(current_key)
-
-        # Check if either hash matches the target
-        if compressed in targets or uncompressed in targets:
-            with lock:
-                print(f"\nMatch found!\nPrivate Key: {current_key.hex()}\nRIPEMD-160 Hash: {compressed if compressed in targets else uncompressed}")
-            save_match(current_key, compressed if compressed in targets else uncompressed)
-            stop_event.set()
-            break
-
-        # Perform kangaroo jump and update state
-        current_key = kangaroo_jump(current_key, jump_table, jump_index)
-        jump_index += 1
-
-        # Increment generated count
-        with lock:
-            generated_count.value += 1
-
-def display_statistics(generated_count, start_time, stop_event):
-    """Display statistics such as total keys generated and generation speed."""
-    while not stop_event.is_set():
-        time.sleep(1)
-        elapsed_time = time.time() - start_time
-        with generated_count.get_lock():
-            total_keys = generated_count.value
-        keys_per_second = total_keys / elapsed_time if elapsed_time > 0 else 0
-        print(f"\r[Total keys generated: {total_keys}][Speed: {keys_per_second:.2f} Keys/s]", end="", flush=True)
-
-def scan_keys(target_file, start_key, end_key):
-    """Main function to start the kangaroo algorithm across multiple processes within specified key ranges."""
-    targets = load_targets(target_file)
-    generated_count = Value('i', 0)
-    lock = Lock()
-    stop_event = Event()
-    jump_table = generate_jump_table(size=100)
-    num_workers = cpu_count()
-
-    # Calculate ranges for each worker
-    ranges = [(start_key + i * (end_key - start_key) // num_workers, start_key + (i + 1) * (end_key - start_key) // num_workers)
-              for i in range(num_workers)]
+# Main function to handle arguments, file loading, and parallel execution
+def main():
+    parser = argparse.ArgumentParser(description="Kangaroo Algorithm for Bitcoin RIPEMD-160 Search")
+    parser.add_argument("-f", "--file", required=True, help="Location of the target RIPEMD-160 file")
+    parser.add_argument("-t", "--threads", type=int, default=os.cpu_count(), help="Number of CPU threads")
+    parser.add_argument("-r", "--range", required=True, help="Range to search in the format start:end (hex)")
+    parser.add_argument("-S", "--seconds", type=int, default=2, help="Output speed frequency in seconds")
     
+    args = parser.parse_args()
+    start_range, end_range = map(lambda x: int(x, 16), args.range.split(":"))
+    max_workers = min(args.threads, os.cpu_count())
+
+    # Load target RIPEMD-160 hashes from file into a numpy array for efficient lookups
+    with open(args.file, 'rb') as f:
+        file_content = f.read()
+        adjusted_size = (len(file_content) // 20) * 20
+        target_ripemd_list = np.frombuffer(file_content[:adjusted_size], dtype='S20')
+
+    print(f"Starting search from {hex(start_range)} to {hex(end_range)} using {max_workers} threads.")
     start_time = time.time()
+    found_any = False
 
-    # Statistics process
-    stats_process = Process(target=display_statistics, args=(generated_count, start_time, stop_event))
-    stats_process.start()
+    with open("RIPFOUND.txt", "a") as found_file:
+        try:
+            with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+                futures = []
+                for _ in range(max_workers):
+                    futures.append(executor.submit(kangaroo_worker, start_range, end_range, target_ripemd_list))
+                
+                while futures:
+                    done, futures = concurrent.futures.wait(futures, timeout=args.seconds, return_when=concurrent.futures.FIRST_COMPLETED)
+                    for future in done:
+                        found_keys = future.result()
+                        for priv_key, ripemd_hex in found_keys:
+                            print(f"Found matching key: {priv_key} | RIPEMD-160: {ripemd_hex}")
+                            found_file.write(f"{priv_key},{ripemd_hex}\n")
+                            found_any = True
 
-    # Launch worker processes for parallel scanning within specified ranges
-    process_list = []
-    for range_start, range_end in ranges:
-        process = Process(
-            target=scan_worker,
-            args=(range_start.to_bytes(32, 'big'), range_end.to_bytes(32, 'big'), targets, jump_table, stop_event, generated_count, lock)
-        )
-        process.daemon = True
-        process.start()
-        process_list.append(process)
-
-    # Wait for all processes to complete
-    for process in process_list:
-        process.join()
-
-    # Stop the statistics process and print final count
-    stop_event.set()
-    stats_process.join()
-    print(f"\nFinal total keys generated: {generated_count.value}")
+                    elapsed = time.time() - start_time
+                    keys_checked = max_workers * (elapsed / args.seconds) * 10000
+                    print(f"Elapsed: {elapsed:.2f}s | Keys Checked: {int(keys_checked)} | Speed: {int(keys_checked / elapsed)} keys/s")
+        
+        except KeyboardInterrupt:
+            print("\nSearch interrupted by user.")
+    
+    if not found_any:
+        print("No matching keys found.")
+    else:
+        print("Matching keys saved to RIPFOUND.txt")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Kangaroo Algorithm for Private Key Search")
-    parser.add_argument("-f", "--file", required=True, help="Path to the target file containing RIPEMD-160 hashes.")
-    args = parser.parse_args()
-
-    # User-defined start and end range for key generation
-    start_hex = input("Enter start of range (hex): ")
-    end_hex = input("Enter end of range (hex): ")
-    start_key = int(start_hex, 16)
-    end_key = int(end_hex, 16)
-
-    # Start scanning keys within the defined range
-    scan_keys(args.file, start_key, end_key)
+    main()
