@@ -1,134 +1,122 @@
-import os
-import time
-import random
-import hashlib
+import concurrent.futures
 import argparse
-from multiprocessing import Process, Value, Event
-from fastecdsa.curve import secp256k1
-from fastecdsa.point import Point as FECPoint
+import time
+import os
+import signal
+import sys
 from Crypto.Hash import RIPEMD160, SHA256
 from coincurve import PrivateKey
+import numpy as np
 
-# Define secp256k1 constants
-SECP256K1_ORDER = secp256k1.q
-G = secp256k1.G
+# Constants for secp256k1 curve
+CURVE_ORDER = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
 
-# Pre-compute 2^k * G for k = 0 to 255
-PRECOMPUTED_STEPS = {2**k: k * G for k in range(256)}
+# Signal handler for graceful shutdown
+def signal_handler(sig, frame):
+    print("\nProcess interrupted by user. Exiting...")
+    sys.exit(0)
 
-# RIPEMD-160 hash computation
-def private_key_to_ripemd160(private_key):
-    priv_key_obj = PrivateKey(private_key)
-    public_key = priv_key_obj.public_key.format(compressed=True)
-    sha256_hash = SHA256.new(public_key).digest()
-    return RIPEMD160.new(sha256_hash).digest().hex()
+# Registering signal to handle keyboard interrupts
+signal.signal(signal.SIGINT, signal_handler)
 
-# Load target hashes
-def load_targets(file_path):
-    try:
-        with open(file_path, 'r') as f:
-            return set(line.strip() for line in f)
-    except FileNotFoundError:
-        print(f"Error: File '{file_path}' not found.")
-        return set()
+# RIPEMD-160 hashing function using PyCryptodome
+def ripemd160(data):
+    h = RIPEMD160.new()
+    h.update(data)
+    return h.digest()
 
-# Kangaroo algorithm for private key search
-def kangaroo_search(public_point, targets, start_key, end_key, stop_event, generated_count, found_file, kangaroo_id):
-    current_point = public_point
-    local_count = 0
-    
-    while not stop_event.is_set():
-        # Convert the point to bytes and compute step size
-        point_bytes = current_point.x.to_bytes(32, 'big') + current_point.y.to_bytes(32, 'big')
-        step_size = (int(hashlib.sha256(point_bytes).hexdigest(), 16) % 256) + 1
-        
-        # Update current point by adding step_size * G (which is a scalar multiplication)
-        current_point += step_size * G
+# Kangaroo worker function for parallel processing
+def kangaroo_worker(start_range, end_range, target_ripemd_list):
+    found_keys = []
+    generated_outputs = []
+    for candidate in range(start_range, end_range):
+        if candidate >= CURVE_ORDER:
+            break
+        try:
+            # Generate private key
+            priv_key = PrivateKey(candidate.to_bytes(32, 'big'))
+            # Derive the public key in compressed format
+            pub_key = priv_key.public_key.format(compressed=True)
+            
+            # Generate RIPEMD-160 hash of the public key
+            sha256_hash = SHA256.new(pub_key).digest()
+            ripemd_hash = ripemd160(sha256_hash)
+            
+            # Save all generated outputs
+            generated_outputs.append(f"{priv_key.to_hex()},{ripemd_hash.hex()}\n")
+            
+            # Check if hash is in target list
+            if ripemd_hash in target_ripemd_list:
+                found_keys.append((priv_key.to_hex(), ripemd_hash.hex()))
+        except Exception as e:
+            print(f"Error with key {hex(candidate)}: {e}")
+    return found_keys, generated_outputs
 
-        # Check if current point matches a precomputed step
-        if current_point in PRECOMPUTED_STEPS:
-            private_key = PRECOMPUTED_STEPS[current_point]
-            ripemd160_hash = private_key_to_ripemd160(private_key.to_bytes(32, 'big'))
-
-            if ripemd160_hash in targets:
-                with open(found_file, 'a') as f:
-                    f.write(f"Kangaroo {kangaroo_id} found key:\nPrivate Key: {private_key}\nRIPEMD-160 Hash: {ripemd160_hash}\n\n")
-                stop_event.set()
-                break
-
-        # Increment counters
-        local_count += 1
-        with generated_count.get_lock():
-            generated_count.value += 1
-
-# Display statistics
-def display_statistics(generated_count, start_time, stop_event, kangaroo_count):
-    while not stop_event.is_set():
-        time.sleep(1)
-        elapsed_time = time.time() - start_time
-        with generated_count.get_lock():
-            keys_generated = generated_count.value
-        keys_per_second = keys_generated / elapsed_time if elapsed_time > 0 else 0
-        print(f"\r[+ Keys Generated: {keys_generated} | Speed: {keys_per_second:.2f} keys/s | Kangaroos: {kangaroo_count}]", end="", flush=True)
-
-# Main function
+# Main function to handle arguments, file loading, and parallel execution
 def main():
-    parser = argparse.ArgumentParser(description="Optimized Kangaroo Algorithm with Parallel Processing.")
-    parser.add_argument('-f', '--file', required=True, help="File containing target RIPEMD-160 hashes")
-    parser.add_argument('-k', '--kangaroos', type=int, default=1, help="Number of parallel kangaroos")
-    parser.add_argument('-s', '--start', type=int, default=1, help="Start of private key range")
-    parser.add_argument('-e', '--end', type=int, default=SECP256K1_ORDER - 1, help="End of private key range")
-    parser.add_argument('-o', '--output', default='found_keys.txt', help="Output file for results")
+    # Argument parsing for CLI options
+    parser = argparse.ArgumentParser(description="Kangaroo Algorithm for Bitcoin RIPEMD-160 Search")
+    parser.add_argument("-f", "--file", required=True, help="Location of the target RIPEMD-160 file")
+    parser.add_argument("-t", "--threads", type=int, default=os.cpu_count(), help="Number of CPU threads")
+    parser.add_argument("-r", "--range", required=True, help="Range to search in the format start:end (hex)")
+    parser.add_argument("-S", "--seconds", type=int, default=2, help="Output speed frequency in seconds")
+    
+    # Parse arguments and assign range and thread counts
     args = parser.parse_args()
+    start_range, end_range = map(lambda x: int(x, 16), args.range.split(":"))
+    max_workers = min(args.threads, os.cpu_count())
+    
+    # Load target RIPEMD-160 hashes from file into a numpy array for efficient lookups
+    with open(args.file, 'rb') as f:
+        file_content = f.read()
+        # Truncate to a multiple of 20 bytes to match RIPEMD-160 hashes
+        adjusted_size = (len(file_content) // 20) * 20
+        target_ripemd_list = np.frombuffer(file_content[:adjusted_size], dtype='S20')
 
-    targets = load_targets(args.file)
-    if not targets:
-        print("No targets loaded. Exiting.")
-        return
-
-    generated_count = Value('i', 0)
-    stop_event = Event()
+    print(f"Starting search from {hex(start_range)} to {hex(end_range)} using {max_workers} threads.")
     start_time = time.time()
+    found_any = False
 
-    # Launch kangaroos
-    kangaroo_processes = []
-    
-    for i in range(args.kangaroos):
-        # Generate a valid public point using a random scalar from the entire valid key space.
-        random_scalar = random.randint(1, SECP256K1_ORDER - 1)  # Ensure this is within valid range
+    # Open output files for all generated keys and matches
+    with open("RIPFOUND.txt", "a") as found_file, open("found.txt", "a") as all_file:
+        try:
+            with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+                futures = []
+                step_size = (end_range - start_range) // max_workers
+                
+                # Dispatching tasks to each worker
+                for i in range(max_workers):
+                    s = start_range + i * step_size
+                    e = s + step_size if i < max_workers - 1 else end_range
+                    futures.append(executor.submit(kangaroo_worker, s, e, target_ripemd_list))
+                
+                # Monitor results and display progress
+                while futures:
+                    done, futures = concurrent.futures.wait(futures, timeout=args.seconds, return_when=concurrent.futures.FIRST_COMPLETED)
+                    for future in done:
+                        found_keys, generated_outputs = future.result()
+                        
+                        # Write all generated outputs to found.txt
+                        all_file.writelines(generated_outputs)
+                        
+                        # Write matching keys to RIPFOUND.txt
+                        for priv_key, ripemd_hex in found_keys:
+                            print(f"Found matching key: {priv_key} | RIPEMD-160: {ripemd_hex}")
+                            found_file.write(f"{priv_key},{ripemd_hex}\n")
+                            found_any = True
+
+                    elapsed = time.time() - start_time
+                    keys_checked = step_size * max_workers * (elapsed / args.seconds)
+                    print(f"Elapsed: {elapsed:.2f}s | Keys Checked: {int(keys_checked)} | Speed: {int(keys_checked / elapsed)} keys/s")
         
-        public_point = random_scalar * G  # This ensures public_point is on the curve
-        
-        process = Process(target=kangaroo_search,
-                          args=(public_point,
-                                targets,
-                                args.start,
-                                args.end,
-                                stop_event,
-                                generated_count,
-                                args.output,
-                                i + 1))
-        
-        kangaroo_processes.append(process)
-        process.start()
-
-    # Display statistics
-    stats_process = Process(target=display_statistics,
-                            args=(generated_count,
-                                  start_time,
-                                  stop_event,
-                                  args.kangaroos))
+        except KeyboardInterrupt:
+            print("\nSearch interrupted by user.")
     
-    stats_process.start()
+    # Summary of results
+    if not found_any:
+        print("No matching keys found.")
+    else:
+        print("Matching keys saved to RIPFOUND.txt")
 
-    # Wait for processes to complete
-    for process in kangaroo_processes:
-        process.join()
-
-    stop_event.set()
-    stats_process.join()
-    
-    print("\nSearch complete.")
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
