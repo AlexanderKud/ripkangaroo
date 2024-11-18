@@ -5,7 +5,7 @@ have a great days !!
 hope you guys will hit something supwe soon !!
 
 #  USAGE:
-
+[
 usage: kangrip.py [-h] -f FILE [-R] [-S] [-k KANGAROOS] [-s START] [-e END] [-o OUTPUT] [-r]
 
 Kangaroo algorithm with RIPEMD-160 hash matching.
@@ -23,6 +23,7 @@ options:
   -o OUTPUT, --output OUTPUT
                         Output file to store found private keys
   -r, --reverse         Enable reverse scan direction
+]
 
 > the COMMAND I'm using is for puzz 66.
 >
