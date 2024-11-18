@@ -2,7 +2,7 @@ SO WLCOME BACK GUYS HER I'M TO SHOW YOU ONE OF MY SHITTY CREATION AGAIN.........
 HaHa.... 
 Hi.. 
 have a great days !!
-hope you guys will hit something supwe soon !!
+hope you guys will hit something super soon !!
 
 #  USAGE:
 
@@ -40,7 +40,7 @@ options:
    > 
    > also according to the theory :
    > 
-   > if -k 100 is used = 7000 then the kang speed will be about 100kangs x speed of one kang = 7000 kngs
+   > if -k 100 is used = 7000 then the kang speed will be about 100kangs x speed of one kang = 70000 kngs
    > 
    > HURRAYYY!!!!!
    > 
